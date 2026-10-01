@@ -1,0 +1,733 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meeting Cartoon</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Comic+Neue:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #fdf8ef;
+    --card: #ffffff;
+    --ink: #1f1d1a;
+    --muted: #6b655c;
+    --accent: #ff6b4a;
+    --accent-ink: #ffffff;
+    --border: #e6dccb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Comic Neue", "Comic Sans MS", system-ui, sans-serif;
+  }
+  main { max-width: 1000px; margin: 0 auto; padding: 24px 16px 60px; }
+  h1 { font-size: 2.4rem; margin: 0 0 4px; }
+  .tagline { margin: 0 0 20px; color: var(--muted); font-size: 1.1rem; }
+  .card {
+    background: var(--card);
+    border: 2px solid var(--border);
+    border-radius: 14px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  label { font-weight: 700; display: block; margin-bottom: 6px; }
+  textarea, input[type=password] {
+    width: 100%;
+    font: inherit;
+    font-size: 1rem;
+    border: 2px solid var(--border);
+    border-radius: 10px;
+    padding: 10px;
+    background: #fffdf9;
+    color: var(--ink);
+  }
+  textarea { min-height: 260px; resize: vertical; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+  button {
+    font: inherit;
+    font-weight: 700;
+    font-size: 1rem;
+    border: 2px solid var(--ink);
+    border-radius: 999px;
+    padding: 10px 18px;
+    background: #fff;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: var(--accent-ink); font-size: 1.2rem; padding: 12px 26px; }
+  button:disabled { opacity: .5; cursor: wait; }
+  .small { font-size: .9rem; color: var(--muted); }
+  details summary { cursor: pointer; font-weight: 700; }
+  #status { min-height: 1.4em; font-weight: 700; }
+  #status.error { color: #c0392b; }
+  #comicWrap { display: none; }
+  canvas { width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 18px rgba(0,0,0,.12); background: #fff; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Meeting Cartoon</h1>
+  <p class="tagline">Paste your meeting notes, get a comic strip. Same decisions, more fun.</p>
+
+  <details class="card" id="keyBox">
+    <summary>Settings: your Claude API key</summary>
+    <p class="small">The app sends your notes to Claude to write the comic, which needs an Anthropic API key
+      (get one at console.anthropic.com). The key stays in this browser on this computer and goes only to Anthropic.</p>
+    <input type="password" id="apiKey" placeholder="sk-ant-..." autocomplete="off">
+    <div class="row">
+      <button id="saveKey">Save key</button>
+      <span class="small" id="keyState"></span>
+    </div>
+  </details>
+
+  <div class="card">
+    <label for="notes">Meeting notes or transcript</label>
+    <textarea id="notes" placeholder="Paste notes here. Speaker names like 'Priya: ...' help, but bullet notes work too."></textarea>
+    <div class="row">
+      <button class="primary" id="make">Make my comic</button>
+      <button id="example">Show me an example</button>
+    </div>
+    <p id="status"></p>
+  </div>
+
+  <div id="comicWrap">
+    <div class="row" style="margin: 0 0 12px">
+      <button class="primary" id="download">Download comic as image</button>
+    </div>
+    <canvas id="comic" width="1200" height="1400"></canvas>
+  </div>
+</main>
+
+<script type="module">
+// ---------- Settings ----------
+const MODEL = "claude-opus-5-5";
+const SDK_URL = "https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@0.131.0/+esm";
+const KEY_STORAGE = "meetingCartoon.apiKey";
+
+// One color per speaker, in the order they appear.
+const PALETTE = ["#ff8a5b", "#4fb3ff", "#7bd389", "#c38bff", "#ffd24f", "#ff7eb6", "#4fd1c5", "#a3a3ff"];
+const MOODS = ["happy", "laughing", "thinking", "surprised", "determined", "worried"];
+const KINDS = ["setup", "discussion", "decision", "action", "wrapup"];
+
+// ---------- What we ask Claude for ----------
+const SCHEMA = {
+  type: "object",
+  properties: {
+    title: { type: "string" },
+    cast: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { name: { type: "string" } },
+        required: ["name"],
+        additionalProperties: false
+      }
+    },
+    panels: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: KINDS },
+          caption: { type: "string" },
+          lines: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                speaker: { type: "string" },
+                text: { type: "string" },
+                mood: { type: "string", enum: MOODS }
+              },
+              required: ["speaker", "text", "mood"],
+              additionalProperties: false
+            }
+          }
+        },
+        required: ["kind", "caption", "lines"],
+        additionalProperties: false
+      }
+    },
+    decisions: { type: "array", items: { type: "string" } },
+    action_items: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          owner: { type: "string" },
+          task: { type: "string" },
+          due: { type: "string" }
+        },
+        required: ["owner", "task", "due"],
+        additionalProperties: false
+      }
+    }
+  },
+  required: ["title", "cast", "panels", "decisions", "action_items"],
+  additionalProperties: false
+};
+
+const SYSTEM_PROMPT = `You turn meeting notes or transcripts into a short, friendly office comic strip.
+
+Accuracy comes first. The comic is a real summary that people will rely on:
+- "decisions" lists every decision actually made in the meeting, stated plainly and faithfully. Do not invent, merge away, or soften decisions. If nothing was decided, return an empty list.
+- "action_items" lists every task someone agreed to do. "owner" is the person named in the notes; if no owner was stated, use "Unassigned". "due" is the deadline exactly as given, or "" if none was given. Never make up owners or dates.
+- Any dialogue that mentions a decision, owner, task or date must match the notes exactly.
+
+Humor is the seasoning: keep it light, kind and work-appropriate. Put jokes in the captions, reactions and banter, never in the facts. Don't mock anyone.
+
+Comic structure:
+- 4 to 6 panels, in the order things happened: usually a setup panel, the main discussion points, the decision(s), and the next steps. Use kind "decision" for panels where something gets decided and kind "action" for panels about who does what next.
+- "cast" lists the speakers, in order of first appearance. Use the real names from the notes. If the notes have no names at all, use one to three generic speakers such as "Team Lead" and "Teammate".
+- Each panel has a short narrator caption (max 12 words) and 1 to 3 speech bubbles. Each bubble is at most 22 words, spoken by someone in the cast, with a mood that fits.
+- "title" is a short, punny title for the comic (max 7 words).`;
+
+// ---------- Example (works without a key) ----------
+const EXAMPLE_NOTES = `Weekly launch sync - Tuesday
+Attendees: Priya, Marcus, Dana
+
+Priya: OK, the big question. Do we launch the new signup page this Friday or wait?
+Marcus: QA found two bugs yesterday. One is cosmetic, one breaks signup on Safari.
+Dana: The Safari one is a one-line fix, I can have it done by Wednesday.
+Priya: Then let's keep Friday, but only if the Safari fix passes QA by Thursday noon.
+- Decided: launch Friday, conditional on Safari fix passing QA by Thu noon
+- Cosmetic bug (button alignment) goes to next sprint, not blocking
+- Marcus to re-run the full QA checklist Thursday morning
+- Dana to fix Safari bug by Wednesday EOD
+- Priya to write the launch announcement email by Thursday
+Marcus asked for snacks at the launch party. Priya said "we'll see."`;
+
+const EXAMPLE_COMIC = {
+  title: "Ready, Set, Safari?",
+  cast: [{ name: "Priya" }, { name: "Marcus" }, { name: "Dana" }],
+  panels: [
+    { kind: "setup", caption: "Tuesday. The launch sync. Coffee levels: critical.",
+      lines: [{ speaker: "Priya", mood: "determined", text: "Big question, team: do we launch the new signup page this Friday, or wait?" }] },
+    { kind: "discussion", caption: "Marcus brings news from QA.",
+      lines: [
+        { speaker: "Marcus", mood: "worried", text: "QA found two bugs. One is cosmetic. The other breaks signup on Safari." },
+        { speaker: "Dana", mood: "happy", text: "The Safari one is a one-line fix. I'll have it done by Wednesday." }
+      ] },
+    { kind: "decision", caption: "A decision appears! It has conditions.",
+      lines: [
+        { speaker: "Priya", mood: "determined", text: "We launch Friday, but only if the Safari fix passes QA by Thursday noon." },
+        { speaker: "Marcus", mood: "thinking", text: "And the wobbly button?" },
+        { speaker: "Priya", mood: "happy", text: "Next sprint. It's not blocking." }
+      ] },
+    { kind: "action", caption: "Who does what next.",
+      lines: [
+        { speaker: "Dana", mood: "determined", text: "Safari fix by Wednesday end of day." },
+        { speaker: "Marcus", mood: "determined", text: "Full QA checklist, Thursday morning." },
+        { speaker: "Priya", mood: "happy", text: "Launch announcement email by Thursday." }
+      ] },
+    { kind: "wrapup", caption: "One last, very important agenda item.",
+      lines: [
+        { speaker: "Marcus", mood: "laughing", text: "Snacks at the launch party?" },
+        { speaker: "Priya", mood: "thinking", text: "We'll see." }
+      ] }
+  ],
+  decisions: [
+    "Launch the new signup page Friday, if the Safari fix passes QA by Thursday noon.",
+    "The cosmetic button-alignment bug moves to next sprint (not blocking)."
+  ],
+  action_items: [
+    { owner: "Dana", task: "Fix the Safari signup bug", due: "Wednesday end of day" },
+    { owner: "Marcus", task: "Re-run the full QA checklist", due: "Thursday morning" },
+    { owner: "Priya", task: "Write the launch announcement email", due: "Thursday" }
+  ]
+};
+
+// ---------- Page wiring ----------
+const $ = (id) => document.getElementById(id);
+const statusEl = $("status");
+
+function setStatus(msg, isError = false) {
+  statusEl.textContent = msg;
+  statusEl.className = isError ? "error" : "";
+}
+
+function loadKey() {
+  try { return localStorage.getItem(KEY_STORAGE) || ""; } catch { return ""; }
+}
+function saveKey(k) {
+  try { localStorage.setItem(KEY_STORAGE, k); } catch { /* private window: key lasts this visit only */ }
+}
+let apiKey = loadKey();
+$("apiKey").value = apiKey;
+$("keyState").textContent = apiKey ? "Key saved." : "No key saved yet.";
+if (!apiKey) $("keyBox").open = true;
+
+$("saveKey").onclick = () => {
+  apiKey = $("apiKey").value.trim();
+  saveKey(apiKey);
+  $("keyState").textContent = apiKey ? "Key saved." : "Key cleared.";
+};
+
+$("example").onclick = async () => {
+  $("notes").value = EXAMPLE_NOTES;
+  setStatus("Here's an example comic made from the sample notes above.");
+  await drawComic(EXAMPLE_COMIC);
+};
+
+$("make").onclick = async () => {
+  const notes = $("notes").value.trim();
+  if (!notes) return setStatus("Paste some meeting notes first.", true);
+  apiKey = $("apiKey").value.trim() || apiKey;
+  if (!apiKey) {
+    $("keyBox").open = true;
+    return setStatus("Add your Claude API key in Settings first (or try the example).", true);
+  }
+  saveKey(apiKey);
+  const btn = $("make");
+  btn.disabled = true;
+  setStatus("Drawing your comic... this usually takes 20-60 seconds.");
+  try {
+    const comic = await writeComic(notes);
+    await drawComic(comic);
+    setStatus("Done! Check that the recap at the bottom matches your meeting.");
+  } catch (err) {
+    console.error(err);
+    setStatus(friendlyError(err), true);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+$("download").onclick = () => {
+  $("comic").toBlob((blob) => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "meeting-comic.png";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }, "image/png");
+};
+
+function friendlyError(err) {
+  const s = err && err.status;
+  if (s === 401) return "Claude didn't accept that API key. Check it in Settings.";
+  if (s === 429) return "Too many requests right now. Wait a minute and try again.";
+  if (s === 529 || s >= 500) return "Claude is busy at the moment. Try again shortly.";
+  if (err && err.name === "TypeError") return "Couldn't reach Claude. Check your internet connection.";
+  return "Something went wrong: " + (err && err.message ? err.message : err);
+}
+
+// ---------- Talking to Claude ----------
+async function writeComic(notes) {
+  const { default: Anthropic } = await import(SDK_URL);
+  // This app runs only on your own computer, so the key living in the browser is OK here.
+  const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
+  const response = await client.beta.messages.create({
+    model: MODEL,
+    max_tokens: 16000,
+    betas: ["server-side-fallback-2026-07-01"],
+    fallbacks: "default",
+    output_config: { effort: "medium", format: { type: "json_schema", schema: SCHEMA } },
+    system: SYSTEM_PROMPT,
+    messages: [{ role: "user", content: "Here are the meeting notes:\n\n<notes>\n" + notes + "\n</notes>" }]
+  });
+  if (response.stop_reason === "refusal") {
+    throw new Error("Claude declined to turn these notes into a comic.");
+  }
+  if (response.stop_reason === "max_tokens") {
+    throw new Error("The notes were too long to finish the comic. Try a shorter excerpt.");
+  }
+  const textBlock = response.content.find((b) => b.type === "text");
+  if (!textBlock) throw new Error("Claude didn't return a comic.");
+  return tidyComic(JSON.parse(textBlock.text));
+}
+
+// Make sure the comic has 4-6 panels and every speaker has a character.
+function tidyComic(c) {
+  c.panels = (c.panels || []).slice(0, 6);
+  const names = c.cast.map((p) => p.name);
+  for (const panel of c.panels) {
+    panel.lines = panel.lines.slice(0, 3);
+    for (const line of panel.lines) {
+      if (!names.includes(line.speaker)) { names.push(line.speaker); c.cast.push({ name: line.speaker }); }
+    }
+  }
+  return c;
+}
+
+// ---------- Drawing ----------
+const W = 1200, M = 30, GAP = 20, PANEL_H = 500, HEADER_H = 110;
+const FONT = '"Comic Neue", "Comic Sans MS", sans-serif';
+
+async function drawComic(comic) {
+  try { await document.fonts.load(`700 20px "Comic Neue"`); } catch { /* fallback font is fine */ }
+  const canvas = $("comic");
+  let ctx = canvas.getContext("2d");
+
+  const colorOf = {};
+  comic.cast.forEach((p, i) => { colorOf[p.name] = { color: PALETTE[i % PALETTE.length], variant: i }; });
+
+  // Panels: up to 3 per row.
+  const n = comic.panels.length;
+  const rows = n <= 3 ? [n] : n === 4 ? [2, 2] : [3, n - 3];
+  const panelsBottom = HEADER_H + rows.length * PANEL_H + (rows.length - 1) * GAP;
+
+  // Measure the recap so the canvas is tall enough.
+  ctx.font = `18px ${FONT}`;
+  const colW = (W - 2 * M - 40) / 2 - 30;
+  const decLines = comic.decisions.length
+    ? comic.decisions.map((d) => wrap(ctx, d, colW)) : [["No decisions recorded."]];
+  const actLines = comic.action_items.length
+    ? comic.action_items.map((a) => wrap(ctx, `${a.owner}: ${a.task}${a.due ? ` (by ${a.due})` : ""}`, colW - 10))
+    : [["No action items recorded."]];
+  const listH = (groups) => groups.reduce((h, g) => h + g.length * 24 + 10, 0);
+  const recapH = 80 + Math.max(listH(decLines), listH(actLines)) + 20;
+
+  canvas.height = panelsBottom + GAP + recapH + M;
+  ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fffaf0";
+  ctx.fillRect(0, 0, W, canvas.height);
+
+  // Title
+  ctx.fillStyle = "#1f1d1a";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  ctx.font = `700 46px ${FONT}`;
+  ctx.fillText(comic.title, W / 2, 64, W - 2 * M);
+  ctx.font = `18px ${FONT}`;
+  ctx.fillStyle = "#6b655c";
+  ctx.fillText("A Meeting Cartoon", W / 2, 92);
+
+  // Panels
+  let idx = 0, y = HEADER_H;
+  for (const count of rows) {
+    const pw = (W - 2 * M - (count - 1) * GAP) / count;
+    for (let c = 0; c < count; c++) {
+      drawPanel(ctx, comic.panels[idx], idx + 1, M + c * (pw + GAP), y, pw, PANEL_H, colorOf, comic.cast);
+      idx++;
+    }
+    y += PANEL_H + GAP;
+  }
+
+  // Recap: the accurate, joke-free part.
+  const ry = panelsBottom + GAP;
+  roundRect(ctx, M, ry, W - 2 * M, recapH, 14);
+  ctx.fillStyle = "#ffffff"; ctx.fill();
+  ctx.lineWidth = 4; ctx.strokeStyle = "#1f1d1a"; ctx.stroke();
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#1f1d1a";
+  ctx.font = `700 26px ${FONT}`;
+  ctx.fillText("The Official Recap", M + 20, ry + 40);
+
+  const colX = [M + 20, M + 20 + colW + 50];
+  ctx.font = `700 21px ${FONT}`;
+  ctx.fillText("What we decided", colX[0], ry + 72);
+  ctx.fillText("Who does what next", colX[1], ry + 72);
+
+  ctx.font = `18px ${FONT}`;
+  let ly = ry + 100;
+  decLines.forEach((lines) => {
+    drawCheck(ctx, colX[0] + 8, ly - 6);
+    lines.forEach((l, i) => ctx.fillText(l, colX[0] + 26, ly + i * 24));
+    ly += lines.length * 24 + 10;
+  });
+  ly = ry + 100;
+  actLines.forEach((lines, k) => {
+    const item = comic.action_items[k];
+    const who = item && colorOf[item.owner];
+    ctx.beginPath(); ctx.arc(colX[1] + 8, ly - 6, 7, 0, Math.PI * 2);
+    ctx.fillStyle = who ? who.color : "#bbbbbb"; ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = "#1f1d1a"; ctx.stroke();
+    ctx.fillStyle = "#1f1d1a";
+    lines.forEach((l, i) => ctx.fillText(l, colX[1] + 26, ly + i * 24));
+    ly += lines.length * 24 + 10;
+  });
+
+  $("comicWrap").style.display = "block";
+  canvas.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+const PANEL_BG = { setup: "#e8f4ff", discussion: "#f3ecff", decision: "#fff4cc", action: "#e5f8e8", wrapup: "#ffe9f1" };
+
+function drawPanel(ctx, panel, num, x, y, w, h, colorOf, cast) {
+  // Background + border
+  ctx.save();
+  roundRect(ctx, x, y, w, h, 12);
+  ctx.fillStyle = PANEL_BG[panel.kind] || "#ffffff";
+  ctx.fill();
+  ctx.clip();
+  // Floor
+  ctx.fillStyle = "rgba(0,0,0,0.06)";
+  ctx.fillRect(x, y + h - 60, w, 60);
+  ctx.restore();
+  roundRect(ctx, x, y, w, h, 12);
+  ctx.lineWidth = 4; ctx.strokeStyle = "#1f1d1a"; ctx.stroke();
+
+  // Caption box
+  ctx.font = `700 16px ${FONT}`;
+  const stamped = panel.kind === "decision" || panel.kind === "action";
+  const capLines = wrap(ctx, `${num}. ${panel.caption}`, w - 44 - (stamped ? 110 : 0));
+  const capH = capLines.length * 20 + 14;
+  ctx.fillStyle = "#fff3a6";
+  ctx.fillRect(x + 12, y + 12, w - 24, capH);
+  ctx.lineWidth = 2; ctx.strokeStyle = "#1f1d1a";
+  ctx.strokeRect(x + 12, y + 12, w - 24, capH);
+  ctx.fillStyle = "#1f1d1a"; ctx.textAlign = "left";
+  capLines.forEach((l, i) => ctx.fillText(l, x + 22, y + 32 + i * 20));
+
+  // Who is in this panel (speakers, or the first two cast members if nobody speaks)
+  let people = [...new Set(panel.lines.map((l) => l.speaker))];
+  if (people.length === 0) people = cast.slice(0, 2).map((p) => p.name);
+  const baseY = y + h - 42;
+  const slot = w / people.length;
+  const pos = {};
+  people.forEach((name, i) => {
+    const px = x + slot * (i + 0.5);
+    pos[name] = px;
+    const line = [...panel.lines].reverse().find((l) => l.speaker === name);
+    const mood = line ? line.mood : "happy";
+    const face = px < x + w / 2 ? 1 : -1;
+    const look = colorOf[name] || { color: "#cccccc", variant: 0 };
+    const scale = people.length === 3 && w < 400 ? 0.82 : 1;
+    drawCharacter(ctx, px, baseY, look.color, look.variant, mood, face, scale);
+    // Name tag
+    ctx.font = `700 15px ${FONT}`;
+    const tw = ctx.measureText(name).width + 16;
+    roundRect(ctx, px - tw / 2, baseY + 8, tw, 24, 12);
+    ctx.fillStyle = "#ffffff"; ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = "#1f1d1a"; ctx.stroke();
+    ctx.fillStyle = "#1f1d1a"; ctx.textAlign = "center";
+    ctx.fillText(name, px, baseY + 25);
+  });
+
+  // Speech bubbles, stacked between the caption and the characters' heads
+  const top = y + 12 + capH + 14;
+  const bottom = baseY - 160;
+  drawBubbles(ctx, panel.lines, x, w, top, bottom, pos, colorOf, baseY - 130);
+
+  // Stamp for decision / action panels
+  if (panel.kind === "decision" || panel.kind === "action") {
+    const label = panel.kind === "decision" ? "DECIDED!" : "TO-DO!";
+    ctx.save();
+    ctx.translate(x + w - 62, y + 30);
+    ctx.rotate(-0.18);
+    ctx.font = `700 22px ${FONT}`;
+    const tw = ctx.measureText(label).width + 20;
+    ctx.strokeStyle = panel.kind === "decision" ? "#d35400" : "#1e8449";
+    ctx.lineWidth = 3;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(-tw / 2, -18, tw, 34);
+    ctx.strokeRect(-tw / 2, -18, tw, 34);
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.textAlign = "center";
+    ctx.fillText(label, 0, 6);
+    ctx.restore();
+  }
+}
+
+function drawBubbles(ctx, lines, px, pw, top, bottom, pos, colorOf, headY) {
+  if (!lines.length) return;
+  const maxW = Math.min(pw - 28, 420);
+  const gap = 10;
+  let size = 20, laid;
+  // Shrink the text until all bubbles fit.
+  for (; size >= 12; size--) {
+    laid = lines.map((l) => {
+      ctx.font = `700 ${size - 3}px ${FONT}`;
+      const nameW = ctx.measureText(l.speaker).width;
+      ctx.font = `${size}px ${FONT}`;
+      const wl = wrap(ctx, l.text, maxW - 24);
+      const textW = Math.max(nameW, ...wl.map((t) => ctx.measureText(t).width));
+      return { l, wl, bw: textW + 24, bh: (wl.length + 1) * (size + 4) + 14 };
+    });
+    const total = laid.reduce((s, b) => s + b.bh, 0) + gap * (laid.length - 1);
+    if (total <= bottom - top || size === 12) break;
+  }
+  let by = top;
+  const boxes = laid.map((b) => {
+    const sx = pos[b.l.speaker] ?? px + pw / 2;
+    const bx = Math.max(px + 14, Math.min(sx - b.bw / 2, px + pw - 14 - b.bw));
+    const box = { ...b, bx, by, sx };
+    by += b.bh + gap;
+    return box;
+  });
+  // Tails first, so later bubbles sit on top of them.
+  for (const b of boxes) {
+    const tx = Math.max(b.bx + 18, Math.min(b.sx, b.bx + b.bw - 18));
+    ctx.beginPath();
+    ctx.moveTo(tx - 10, b.by + b.bh - 4);
+    ctx.lineTo(b.sx, headY);
+    ctx.lineTo(tx + 10, b.by + b.bh - 4);
+    ctx.closePath();
+    ctx.fillStyle = "#ffffff"; ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = "#1f1d1a"; ctx.stroke();
+  }
+  for (const b of boxes) {
+    roundRect(ctx, b.bx, b.by, b.bw, b.bh, 16);
+    ctx.fillStyle = "#ffffff"; ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = "#1f1d1a"; ctx.stroke();
+    // Re-cover the tail joint so it looks seamless
+    const tx = Math.max(b.bx + 18, Math.min(b.sx, b.bx + b.bw - 18));
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(tx - 8, b.by + b.bh - 4, 16, 3);
+    ctx.textAlign = "left";
+    ctx.font = `700 ${size - 3}px ${FONT}`;
+    ctx.fillStyle = darken((colorOf[b.l.speaker] || { color: "#888888" }).color, 0.35);
+    ctx.fillText(b.l.speaker, b.bx + 12, b.by + 8 + size - 4);
+    ctx.font = `${size}px ${FONT}`;
+    ctx.fillStyle = "#1f1d1a";
+    b.wl.forEach((t, i) => ctx.fillText(t, b.bx + 12, b.by + 8 + (i + 2) * (size + 4) - 4));
+  }
+}
+
+// A friendly blob creature. Each speaker gets a color and a different accessory.
+function drawCharacter(ctx, x, baseY, color, variant, mood, face, scale) {
+  ctx.save();
+  ctx.translate(x, baseY);
+  ctx.scale(scale, scale);
+  const ink = "#1f1d1a", dark = darken(color, 0.25);
+  ctx.lineWidth = 3; ctx.strokeStyle = ink; ctx.lineCap = "round"; ctx.lineJoin = "round";
+
+  // Feet
+  ctx.fillStyle = dark;
+  [-18, 18].forEach((fx) => { ctx.beginPath(); ctx.ellipse(fx, -4, 15, 8, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); });
+
+  // Arms
+  const up = mood === "laughing" || mood === "surprised";
+  [-1, 1].forEach((side) => {
+    ctx.beginPath();
+    ctx.moveTo(side * 40, -55);
+    const hx = side * 62, hy = up ? -100 : -35;
+    ctx.quadraticCurveTo(side * 58, up ? -70 : -50, hx, hy);
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(hx, hy, 7, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill(); ctx.stroke();
+  });
+
+  // Accessories that sit behind the body
+  const v = variant % 6;
+  if (v === 0) { // antenna
+    ctx.beginPath(); ctx.moveTo(0, -112); ctx.lineTo(face * 8, -140); ctx.stroke();
+    ctx.beginPath(); ctx.arc(face * 8, -144, 7, 0, Math.PI * 2); ctx.fillStyle = "#ffd24f"; ctx.fill(); ctx.stroke();
+  } else if (v === 1) { // round ears
+    [-1, 1].forEach((s) => { ctx.beginPath(); ctx.arc(s * 30, -100, 14, 0, Math.PI * 2); ctx.fillStyle = dark; ctx.fill(); ctx.stroke(); });
+  }
+
+  // Body
+  ctx.beginPath();
+  ctx.moveTo(-44, -14);
+  ctx.bezierCurveTo(-52, -80, -34, -118, 0, -118);
+  ctx.bezierCurveTo(34, -118, 52, -80, 44, -14);
+  ctx.quadraticCurveTo(0, -4, -44, -14);
+  ctx.closePath();
+  ctx.fillStyle = color; ctx.fill(); ctx.stroke();
+  // Belly
+  ctx.beginPath(); ctx.ellipse(0, -36, 22, 16, 0, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(255,255,255,0.35)"; ctx.fill();
+
+  // Accessories on top of the body
+  if (v === 2) { // hair tuft
+    ctx.fillStyle = dark;
+    [-12, 0, 12].forEach((hx, i) => { ctx.beginPath(); ctx.arc(hx, -118 - (i === 1 ? 6 : 0), 9, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); });
+  } else if (v === 3) { // little hat
+    ctx.fillStyle = "#3d3d5c";
+    ctx.fillRect(-26, -122, 52, 8); ctx.strokeRect(-26, -122, 52, 8);
+    ctx.fillRect(-16, -146, 32, 26); ctx.strokeRect(-16, -146, 32, 26);
+  } else if (v === 5) { // bow tie
+    ctx.fillStyle = "#e74c3c";
+    ctx.beginPath(); ctx.moveTo(0, -58); ctx.lineTo(-14, -66); ctx.lineTo(-14, -50); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, -58); ctx.lineTo(14, -66); ctx.lineTo(14, -50); ctx.closePath(); ctx.fill(); ctx.stroke();
+  }
+
+  // Eyes
+  const eyeY = -82, look = face * 3;
+  [-15, 15].forEach((ex) => {
+    ctx.beginPath(); ctx.ellipse(ex, eyeY, 10, mood === "surprised" ? 14 : 12, 0, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff"; ctx.fill(); ctx.lineWidth = 2.5; ctx.stroke();
+    if (mood === "laughing") {
+      ctx.fillStyle = color; ctx.fill(); // closed, happy eyes
+      ctx.beginPath(); ctx.arc(ex, eyeY + 3, 7, Math.PI * 1.1, Math.PI * 1.9); ctx.stroke();
+    } else {
+      ctx.beginPath(); ctx.arc(ex + look, eyeY + (mood === "thinking" ? -4 : 1), 5, 0, Math.PI * 2);
+      ctx.fillStyle = ink; ctx.fill();
+      ctx.beginPath(); ctx.arc(ex + look + 2, eyeY - 2, 1.6, 0, Math.PI * 2);
+      ctx.fillStyle = "#ffffff"; ctx.fill();
+    }
+  });
+  if (v === 4) { // glasses
+    ctx.lineWidth = 2.5;
+    [-15, 15].forEach((ex) => { ctx.beginPath(); ctx.arc(ex, eyeY, 14, 0, Math.PI * 2); ctx.stroke(); });
+    ctx.beginPath(); ctx.moveTo(-1, eyeY); ctx.lineTo(1, eyeY); ctx.stroke();
+  }
+
+  // Eyebrows
+  ctx.lineWidth = 3;
+  if (mood === "determined") {
+    ctx.beginPath(); ctx.moveTo(-24, -100); ctx.lineTo(-7, -95); ctx.moveTo(24, -100); ctx.lineTo(7, -95); ctx.stroke();
+  } else if (mood === "worried") {
+    ctx.beginPath(); ctx.moveTo(-24, -95); ctx.lineTo(-7, -100); ctx.moveTo(24, -95); ctx.lineTo(7, -100); ctx.stroke();
+  } else if (mood === "thinking") {
+    ctx.beginPath(); ctx.moveTo(6, -102); ctx.lineTo(24, -99); ctx.stroke();
+  }
+
+  // Cheeks
+  ctx.fillStyle = "rgba(255,105,135,0.35)";
+  [-26, 26].forEach((cx) => { ctx.beginPath(); ctx.ellipse(cx, -64, 7, 4, 0, 0, Math.PI * 2); ctx.fill(); });
+
+  // Mouth
+  ctx.lineWidth = 3; ctx.strokeStyle = ink;
+  ctx.beginPath();
+  if (mood === "happy") {
+    ctx.arc(0, -66, 10, Math.PI * 0.15, Math.PI * 0.85); ctx.stroke();
+  } else if (mood === "laughing") {
+    ctx.moveTo(-12, -66); ctx.quadraticCurveTo(0, -42, 12, -66); ctx.closePath();
+    ctx.fillStyle = "#7a2b2b"; ctx.fill(); ctx.stroke();
+  } else if (mood === "surprised") {
+    ctx.ellipse(0, -58, 6, 8, 0, 0, Math.PI * 2); ctx.fillStyle = "#7a2b2b"; ctx.fill(); ctx.stroke();
+  } else if (mood === "thinking") {
+    ctx.moveTo(-6 + face * 4, -60); ctx.lineTo(8 + face * 4, -62); ctx.stroke();
+  } else if (mood === "worried") {
+    ctx.moveTo(-10, -57); ctx.quadraticCurveTo(-5, -63, 0, -58); ctx.quadraticCurveTo(5, -53, 10, -59); ctx.stroke();
+  } else { // determined
+    ctx.moveTo(-10, -60); ctx.lineTo(10, -60); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ---------- Small helpers ----------
+function wrap(ctx, text, maxW) {
+  const words = String(text).split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = "";
+  for (const word of words) {
+    const test = line ? line + " " + word : word;
+    if (ctx.measureText(test).width > maxW && line) { lines.push(line); line = word; }
+    else line = test;
+  }
+  if (line) lines.push(line);
+  return lines.length ? lines : [""];
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawCheck(ctx, x, y) {
+  ctx.save();
+  ctx.fillStyle = "#7bd389"; ctx.strokeStyle = "#1f1d1a"; ctx.lineWidth = 2;
+  ctx.fillRect(x - 8, y - 8, 16, 16); ctx.strokeRect(x - 8, y - 8, 16, 16);
+  ctx.beginPath(); ctx.moveTo(x - 4, y); ctx.lineTo(x - 1, y + 4); ctx.lineTo(x + 5, y - 5); ctx.stroke();
+  ctx.restore();
+}
+
+function darken(hex, amt) {
+  const n = parseInt(hex.slice(1), 16);
+  const f = (c) => Math.max(0, Math.round(c * (1 - amt)));
+  return `rgb(${f(n >> 16)}, ${f((n >> 8) & 255)}, ${f(n & 255)})`;
+}
+</script>
+</body>
+</html>
